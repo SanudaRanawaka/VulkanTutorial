@@ -1,0 +1,5 @@
+C:/Users/Sanuda/Documents/Sanu/vulkan/HelloTriangle/out/build/x64-debug/CMakeFiles/edit_cache.dir
+C:/Users/Sanuda/Documents/Sanu/vulkan/HelloTriangle/out/build/x64-debug/CMakeFiles/rebuild_cache.dir
+C:/Users/Sanuda/Documents/Sanu/vulkan/HelloTriangle/out/build/x64-debug/HelloTriangle/CMakeFiles/HelloTriangle.dir
+C:/Users/Sanuda/Documents/Sanu/vulkan/HelloTriangle/out/build/x64-debug/HelloTriangle/CMakeFiles/edit_cache.dir
+C:/Users/Sanuda/Documents/Sanu/vulkan/HelloTriangle/out/build/x64-debug/HelloTriangle/CMakeFiles/rebuild_cache.dir
