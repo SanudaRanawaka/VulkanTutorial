@@ -78,6 +78,10 @@ private:
     // command buffer
     vk::raii::CommandPool commandPool = nullptr;
     vk::raii::CommandBuffer commandBuffer = nullptr;
+    // sync
+    vk::raii::Semaphore presentCompleteSemaphore = nullptr;
+    vk::raii::Semaphore renderFinishedSemaphore = nullptr;
+    vk::raii::Fence drawFence = nullptr;
 
     
     
@@ -94,6 +98,7 @@ private:
         createGraphicsPipeline();
         createCommandPool();
         createCommandBuffer();
+        createSyncObjects();
     }
 
     void initWindow() {
@@ -115,7 +120,9 @@ private:
     void mainLoop() {
         while (!glfwWindowShouldClose(window)) {
             glfwPollEvents();
+            drawFrame();
         }
+        device.waitIdle();
     }
 
     void cleanup() {
@@ -266,11 +273,11 @@ private:
         };
         // extension we want
         std::vector<const char*> deviceExtensions = {
+            vk::KHRSynchronization2ExtensionName,
             vk::KHRSwapchainExtensionName,
             vk::KHRSpirv14ExtensionName,
-            vk::KHRSynchronization2ExtensionName,
             vk::KHRCreateRenderpass2ExtensionName,
-            vk::KHRShaderDrawParametersExtensionName
+            vk::KHRShaderDrawParametersExtensionName,
         };
 
         // vulkan follows the pnext pointer and can see the connected features from the featureChain
@@ -554,10 +561,137 @@ private:
         commandBuffer = std::move(vk::raii::CommandBuffers(device, cmdBufferAllocateInfo).front());
     }
 
-    void recordCommandBuffer(uint32_t imageIndex) {
+    void recordCommandBuffer(uint32_t imageIndex)
+    {
         commandBuffer.begin({});
+        // Before starting rendering, transition the swapchain image to COLOR_ATTACHMENT_OPTIMAL
+        transition_image_layout(
+            imageIndex,
+            vk::ImageLayout::eUndefined,
+            vk::ImageLayout::eColorAttachmentOptimal,
+            {},                                                        // srcAccessMask (no need to wait for previous operations)
+            vk::AccessFlagBits2::eColorAttachmentWrite,                // dstAccessMask
+            vk::PipelineStageFlagBits2::eColorAttachmentOutput,        // srcStage
+            vk::PipelineStageFlagBits2::eColorAttachmentOutput         // dstStage
+        );
+        vk::ClearValue              clearColor = vk::ClearColorValue(0.0f, 0.0f, 0.0f, 1.0f);
+        vk::RenderingAttachmentInfo attachmentInfo = {
+            .imageView = swapChainImageViews[imageIndex],
+            .imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
+            .loadOp = vk::AttachmentLoadOp::eClear,
+            .storeOp = vk::AttachmentStoreOp::eStore,
+            .clearValue = clearColor };
+        vk::RenderingInfo renderingInfo = {
+            .renderArea = {.offset = {0, 0}, .extent = swapChainExtent},
+            .layerCount = 1,
+            .colorAttachmentCount = 1,
+            .pColorAttachments = &attachmentInfo };
 
+        commandBuffer.beginRendering(renderingInfo);
+        commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, *graphicsPipeline);
+        commandBuffer.setViewport(0, vk::Viewport(0.0f, 0.0f, static_cast<float>(swapChainExtent.width), static_cast<float>(swapChainExtent.height), 0.0f, 1.0f));
+        commandBuffer.setScissor(0, vk::Rect2D(vk::Offset2D(0, 0), swapChainExtent));
+        commandBuffer.draw(3, 1, 0, 0);
+        commandBuffer.endRendering();
+        // After rendering, transition the swapchain image to PRESENT_SRC
+        transition_image_layout(
+            imageIndex,
+            vk::ImageLayout::eColorAttachmentOptimal,
+            vk::ImageLayout::ePresentSrcKHR,
+            vk::AccessFlagBits2::eColorAttachmentWrite,                // srcAccessMask
+            {},                                                        // dstAccessMask
+            vk::PipelineStageFlagBits2::eColorAttachmentOutput,        // srcStage
+            vk::PipelineStageFlagBits2::eBottomOfPipe                  // dstStage
+        );
+        commandBuffer.end();
     }
+
+    void transition_image_layout(uint32_t imageIndex, vk::ImageLayout oldLayout,
+        vk::ImageLayout newLayout, vk::AccessFlags2 srcAccessMask, vk::AccessFlags2 dstAccessMask,
+        vk::PipelineStageFlags2 srcStageMask, vk::PipelineStageFlags2 dstStageMask){
+        vk::ImageMemoryBarrier2 barrier = {
+            .srcStageMask = srcStageMask, .srcAccessMask = srcAccessMask,
+            .dstStageMask = dstStageMask, .dstAccessMask = dstAccessMask,
+            .oldLayout = oldLayout, .newLayout = newLayout,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = swapChainImages[imageIndex],
+            .subresourceRange = {
+                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1
+            }
+        };
+        vk::DependencyInfo dependencyInfo = {
+        .dependencyFlags = {},
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &barrier
+        };
+        commandBuffer.pipelineBarrier2(dependencyInfo);
+    }
+
+
+    //At a high level, rendering a frame in Vulkan consists of a common set of steps:
+    // 1. Wait for the previous frame to finish
+    // 2. Acquire an image from the swap chain
+    // 3. Record a command buffer which draws the scene onto that image
+    // 4. Submit the recorded command buffer
+    // 5. Present the swap chain image
+
+    void drawFrame() {
+        graphicsQueue.waitIdle();
+        
+        // 1. wait  pointer to fences, wait for all fences is true, max block time is UINT64_MAX
+        auto fenceResult = device.waitForFences(*drawFence, vk::True, UINT64_MAX);
+        // 2. Acquire an image from the swap chain
+        auto [result, imageIndex] = swapChain.acquireNextImage(UINT64_MAX, *presentCompleteSemaphore, nullptr);
+        // 3. Record a command buffer which draws the scene onto that image
+        recordCommandBuffer(imageIndex);
+        device.resetFences(*drawFence);
+        // prepare submit
+        vk::PipelineStageFlags waitDestinationStageMask(vk::PipelineStageFlagBits::eColorAttachmentOutput);
+        const vk::SubmitInfo submitInfo{
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &*presentCompleteSemaphore,
+            .pWaitDstStageMask = &waitDestinationStageMask,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &*commandBuffer,
+            .signalSemaphoreCount = 1,
+            .pSignalSemaphores = &*renderFinishedSemaphore 
+        };
+        // 4. submit
+        graphicsQueue.submit(submitInfo, *drawFence);
+
+        const vk::PresentInfoKHR presentInfoKHR{
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &*renderFinishedSemaphore,
+            .swapchainCount = 1,
+            .pSwapchains = &*swapChain,
+            .pImageIndices = &imageIndex 
+        };
+        // 5. present
+        result = presentQueue.presentKHR(presentInfoKHR);
+        switch (result)
+        {
+        case vk::Result::eSuccess:
+            break;
+        case vk::Result::eSuboptimalKHR:
+            std::cout << "vk::Queue::presentKHR returned vk::Result::eSuboptimalKHR !\n";
+            break;
+        default:
+            break;        // an unexpected result is returned!
+        }
+    }
+
+    void createSyncObjects() {
+        presentCompleteSemaphore = vk::raii::Semaphore(device, vk::SemaphoreCreateInfo());
+        renderFinishedSemaphore = vk::raii::Semaphore(device, vk::SemaphoreCreateInfo());
+        drawFence = vk::raii::Fence(device, { .flags = vk::FenceCreateFlagBits::eSignaled });
+    }
+
+
 
 };
 
