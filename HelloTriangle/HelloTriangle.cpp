@@ -266,10 +266,12 @@ private:
         };
 
         // Create a chain of feature structures, by default vulkan only includes vulkan1.0 features
+        // apparently .samplerAnisotropy = true will pass validation layers
+        vk::PhysicalDeviceFeatures physdevfeatures = {.samplerAnisotropy = true};
         vk::StructureChain<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan13Features, vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT> featureChain = {
-            {},                               // vk::PhysicalDeviceFeatures2 (empty for now)
+            {.features = physdevfeatures},                               // vk::PhysicalDeviceFeatures2 (empty for now)
             {.dynamicRendering = true },      // Enable dynamic rendering from Vulkan 1.3
-            {.extendedDynamicState = true }   // Enable extended dynamic state from the extension
+            {.extendedDynamicState = true}   // Enable extended dynamic state from the extension
         };
         // extension we want
         std::vector<const char*> deviceExtensions = {
@@ -279,7 +281,6 @@ private:
             vk::KHRCreateRenderpass2ExtensionName,
             vk::KHRShaderDrawParametersExtensionName,
         };
-
         // vulkan follows the pnext pointer and can see the connected features from the featureChain
         vk::DeviceCreateInfo deviceCreateInfo{.pNext = &featureChain.get<vk::PhysicalDeviceFeatures2>(),
             .queueCreateInfoCount = 1,
