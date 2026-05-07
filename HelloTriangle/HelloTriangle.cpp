@@ -87,6 +87,8 @@ private:
     // each frame needs its own command buffers and sync objects
     const uint32_t MAX_FRAMES_IN_FLIGHT = 2;
     uint32_t frameIndex = 0;
+    // window resized
+    bool framebufferResized = false;
 
 
     void initVulkan() {
@@ -111,12 +113,14 @@ private:
         // tell it not to open an openGL window
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         // disable window resizing for now as its complicated
-        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+        glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
         // 4th is more monitor selection, 5th is for opengl only
         window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan Window", nullptr, nullptr);
         if (!window) {
             throw std::runtime_error("Failed to create GLFW window");
 		}
+        glfwSetWindowUserPointer(window, this);
+        glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
     }
 
     void mainLoop() {
@@ -128,6 +132,7 @@ private:
     }
 
     void cleanup() {
+        cleanupSwapChain();
         glfwDestroyWindow(window);
         glfwTerminate();
     }
@@ -658,10 +663,25 @@ private:
         {
             throw std::runtime_error("failed to wait for fence!");
         }
-        device.resetFences(*drawFences[frameIndex]);
+        
         // reset if previous frame already happened
         // 2. Acquire an image from the swap chain
         auto [result, imageIndex] = swapChain.acquireNextImage(UINT64_MAX, *presentCompleteSemaphores[frameIndex], nullptr);
+        switch (result) {
+        case vk::Result::eSuccess:
+            break;
+        case vk::Result::eErrorOutOfDateKHR:
+
+            recreateSwapChain();
+            return;
+        case vk::Result::eSuboptimalKHR:
+            std::cout << "vk::swapChain.acquireNextImage returned vk::Result::eSuboptimalKHR !\n";
+            break;
+        default:
+            assert(result == vk::Result::eTimeout || result == vk::Result::eNotReady);
+            throw std::runtime_error("failed to acquire swap chain image!");    // an unexpected result is returned!
+        }
+        device.resetFences(*drawFences[frameIndex]);
         // 3. Record a command buffer which draws the scene onto that image
         recordCommandBuffer(imageIndex);
         device.resetFences(*drawFences[frameIndex]);
@@ -688,15 +708,21 @@ private:
         };
         // 5. present
         result = presentQueue.presentKHR(presentInfoKHR);
-        switch (result)
-        {
+        switch (result){
         case vk::Result::eSuccess:
             break;
+        case vk::Result::eErrorOutOfDateKHR:
+            framebufferResized = false;
+            recreateSwapChain();
+            return;
         case vk::Result::eSuboptimalKHR:
             std::cout << "vk::Queue::presentKHR returned vk::Result::eSuboptimalKHR !\n";
+            framebufferResized = false;
+            recreateSwapChain();
             break;
         default:
-            break;        // an unexpected result is returned!
+            assert(result == vk::Result::eTimeout || result == vk::Result::eNotReady);
+            throw std::runtime_error("failed to presentswap chain image!");    // an unexpected result is returned!
         }
         frameIndex = (frameIndex + 1) % MAX_FRAMES_IN_FLIGHT;
     }
@@ -714,7 +740,29 @@ private:
         }
     }
 
+    void recreateSwapChain(){
+        int width = 0, height = 0;
+        glfwGetFramebufferSize(window, &width, &height);
+        while (width == 0 || height == 0) {
+            glfwGetFramebufferSize(window, &width, &height);
+            glfwWaitEvents();
+        }
+        device.waitIdle();
 
+        createSwapChain();
+        createImageViews();
+    }
+
+    void cleanupSwapChain(){
+        swapChainImageViews.clear();
+        swapChain = nullptr; 
+    }
+
+
+    static void framebufferResizeCallback(GLFWwindow* window, int width, int height){
+        auto app = reinterpret_cast<HelloTriangleApplication*>(glfwGetWindowUserPointer(window));
+        app->framebufferResized = true;
+    }
 
 };
 
