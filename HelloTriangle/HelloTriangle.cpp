@@ -46,7 +46,7 @@ public:
 
 private:
 
-    GLFWwindow* window;
+    GLFWwindow* window = nullptr;
     // only want one instance at a time
     vk::raii::Instance instance = nullptr;
     // debug
@@ -131,11 +131,12 @@ private:
     }
 
     void createInstance() {
-        constexpr vk::ApplicationInfo appInfo{ .pApplicationName = "Hello Triangle",
-                                               .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
-                                               .pEngineName = "No Engine",
-                                               .engineVersion = VK_MAKE_VERSION(1, 0, 0),
-                                               .apiVersion = vk::ApiVersion14
+        constexpr vk::ApplicationInfo appInfo{ 
+            .pApplicationName = "Hello Triangle",
+            .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
+            .pEngineName = "No Engine",
+            .engineVersion = VK_MAKE_VERSION(1, 0, 0),
+            .apiVersion = vk::ApiVersion14
         };
 
         // Get the required layers
@@ -268,20 +269,24 @@ private:
         // Create a chain of feature structures, by default vulkan only includes vulkan1.0 features
         // apparently .samplerAnisotropy = true will pass validation layers
         vk::PhysicalDeviceFeatures physdevfeatures = {.samplerAnisotropy = true};
+        vk::PhysicalDeviceVulkan13Features vulkanCoreFeatures = {.dynamicRendering = true};
+        vulkanCoreFeatures.setSynchronization2(true);
         vk::StructureChain<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan13Features, vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT> featureChain = {
             {.features = physdevfeatures},                               // vk::PhysicalDeviceFeatures2 (empty for now)
-            {.dynamicRendering = true },      // Enable dynamic rendering from Vulkan 1.3
+            vulkanCoreFeatures ,      // Enable dynamic rendering from Vulkan 1.3
             {.extendedDynamicState = true}   // Enable extended dynamic state from the extension
         };
         // extension we want
         std::vector<const char*> deviceExtensions = {
-            vk::KHRSynchronization2ExtensionName,
+            //vk::KHRSynchronization2ExtensionName,
             vk::KHRSwapchainExtensionName,
             vk::KHRSpirv14ExtensionName,
             vk::KHRCreateRenderpass2ExtensionName,
             vk::KHRShaderDrawParametersExtensionName,
         };
         // vulkan follows the pnext pointer and can see the connected features from the featureChain
+        // use core synch2 instead of khr extension
+        vk::PhysicalDeviceSynchronization2Features synch2features{.synchronization2 = VK_TRUE};
         vk::DeviceCreateInfo deviceCreateInfo{.pNext = &featureChain.get<vk::PhysicalDeviceFeatures2>(),
             .queueCreateInfoCount = 1,
             .pQueueCreateInfos = &deviceQueueCreationInfo,
@@ -436,7 +441,7 @@ private:
         vk::ImageViewCreateInfo imageViewCreateInfo{ .viewType = vk::ImageViewType::e2D, .format = swapChainImageFormat,
           .subresourceRange = { vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 } };
 
-        for (auto img : swapChainImages) {
+        for (vk::Image img : swapChainImages) {
             imageViewCreateInfo.image = img;
             swapChainImageViews.emplace_back(device, imageViewCreateInfo);
         }
@@ -562,8 +567,7 @@ private:
         commandBuffer = std::move(vk::raii::CommandBuffers(device, cmdBufferAllocateInfo).front());
     }
 
-    void recordCommandBuffer(uint32_t imageIndex)
-    {
+    void recordCommandBuffer(uint32_t imageIndex){
         commandBuffer.begin({});
         // Before starting rendering, transition the swapchain image to COLOR_ATTACHMENT_OPTIMAL
         transition_image_layout(
