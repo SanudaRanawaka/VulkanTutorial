@@ -5,7 +5,8 @@
 #include <stdexcept>
 #include <map>
 #include <fstream>
-
+#include <glm/glm.hpp>
+#include <array>
 #if defined(__INTELLISENSE__) || !defined(USE_CPP20_MODULES)
 #define VULKAN_HPP_NO_STRUCT_CONSTRUCTORS
 #include <vulkan/vulkan_raii.hpp>
@@ -47,6 +48,8 @@ public:
 private:
 
     GLFWwindow* window = nullptr;
+    // only want one device context at a time
+    vk::raii::Context context;
     // only want one instance at a time
     vk::raii::Instance instance = nullptr;
     // debug
@@ -54,8 +57,6 @@ private:
     // window, The window surface needs to be created right after the instance creation
     // because it can actually influence the physical device selection
     vk::raii::SurfaceKHR surface = nullptr;
-	// only want one device context at a time
-	vk::raii::Context context;
     // one graphics card for now
     vk::raii::PhysicalDevice physicalDevice = nullptr;
     // logical device
@@ -77,17 +78,28 @@ private:
     vk::raii::Pipeline graphicsPipeline = nullptr;
     // command buffer
     vk::raii::CommandPool commandPool = nullptr;
-    std::vector<vk::raii::CommandBuffer> commandBuffers; // each frame will have own commandbuffer
+    std::vector <vk::raii::CommandBuffer> commandBuffers;
     // sync
     std::vector<vk::raii::Semaphore> presentCompleteSemaphores;
-    std::vector<vk::raii::Semaphore> renderFinishedSemaphores;
-    std::vector<vk::raii::Fence> drawFences;
-    //frames in flight
-    const uint32_t MAX_FRAMES_IN_FLIGHT = 2;
-    uint32_t frameIndex = 0; //current frame
+    std::vector <vk::raii::Semaphore> renderFinishedSemaphores;
+    std::vector <vk::raii::Fence> drawFences;
 
-    
-    
+    // concurrent rendering
+    // each frame needs its own command buffers and sync objects
+    const uint32_t MAX_FRAMES_IN_FLIGHT = 2;
+    uint32_t frameIndex = 0;
+    // window resized
+    bool framebufferResized = false;
+
+    //vertices moved from shader code
+    const std::vector<Vertex> vertices = {
+    {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+    {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
+    {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
+    };
+
+    // vertex buffer
+    vk::raii::Buffer vertexBuffer;
 
 
     void initVulkan() {
@@ -100,6 +112,7 @@ private:
         createImageViews();
         createGraphicsPipeline();
         createCommandPool();
+        createVertexBuffer();
         createCommandBuffers();
         createSyncObjects();
     }
@@ -112,12 +125,14 @@ private:
         // tell it not to open an openGL window
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         // disable window resizing for now as its complicated
-        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+        glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
         // 4th is more monitor selection, 5th is for opengl only
         window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan Window", nullptr, nullptr);
         if (!window) {
             throw std::runtime_error("Failed to create GLFW window");
 		}
+        glfwSetWindowUserPointer(window, this);
+        glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
     }
 
     void mainLoop() {
@@ -129,6 +144,7 @@ private:
     }
 
     void cleanup() {
+        cleanupSwapChain();
         glfwDestroyWindow(window);
         glfwTerminate();
     }
@@ -455,8 +471,16 @@ private:
         vk::PipelineShaderStageCreateInfo vertShaderStageInfo{ .stage = vk::ShaderStageFlagBits::eVertex, .module = shaderModule,  .pName = "vertMain" };
         vk::PipelineShaderStageCreateInfo fragShaderStageInfo{ .stage = vk::ShaderStageFlagBits::eFragment, .module = shaderModule, .pName = "fragMain" };
         vk::PipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
+
         // vertex stuff
         vk::PipelineVertexInputStateCreateInfo vertexInputInfo = {};
+        vertexInputInfo.vertexBindingDescriptionCount = 1;
+        vk::VertexInputBindingDescription bindingDescription = Vertex::getBindingDescription();
+        auto attributeDescriptions = Vertex::getAttributeDescriptions();
+        vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+        vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+        vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
+
         // creating dynamic states so we can change later without making whole new pipeline
         // the pipeline will ignore and not set these so have to do it manually when drawing
         std::vector dynamicStates = {vk::DynamicState::eViewport,vk::DynamicState::eScissor};
@@ -562,7 +586,7 @@ private:
     }
 
     void createCommandBuffers() {
-        vk::CommandBufferAllocateInfo cmdBufferAllocateInfo = {.commandPool = commandPool,
+        vk::CommandBufferAllocateInfo cmdBufferAllocateInfo = { .commandPool = commandPool,
             .level = vk::CommandBufferLevel::ePrimary,
             .commandBufferCount = MAX_FRAMES_IN_FLIGHT
         };
@@ -599,7 +623,9 @@ private:
         commandBuffers[frameIndex].bindPipeline(vk::PipelineBindPoint::eGraphics, *graphicsPipeline);
         commandBuffers[frameIndex].setViewport(0, vk::Viewport(0.0f, 0.0f, static_cast<float>(swapChainExtent.width), static_cast<float>(swapChainExtent.height), 0.0f, 1.0f));
         commandBuffers[frameIndex].setScissor(0, vk::Rect2D(vk::Offset2D(0, 0), swapChainExtent));
+
         commandBuffers[frameIndex].draw(3, 1, 0, 0);
+        //vertexCount, instanceCount, firstVertex, firstInstance
         commandBuffers[frameIndex].endRendering();
         // After rendering, transition the swapchain image to PRESENT_SRC
         transition_image_layout(
@@ -652,16 +678,33 @@ private:
         graphicsQueue.waitIdle();
         
         // 1. wait  pointer to fences, wait for all fences is true, max block time is UINT64_MAX
-        if (device.waitForFences(*drawFences[frameIndex], vk::True, UINT64_MAX) != vk::Result::eSuccess){
+        auto fenceResult = device.waitForFences(*drawFences[frameIndex], vk::True, UINT64_MAX);
+        if (fenceResult != vk::Result::eSuccess)
+        {
             throw std::runtime_error("failed to wait for fence!");
         }
-        device.resetFences(*drawFences[frameIndex]);
+        
+        // reset if previous frame already happened
         // 2. Acquire an image from the swap chain
         auto [result, imageIndex] = swapChain.acquireNextImage(UINT64_MAX, *presentCompleteSemaphores[frameIndex], nullptr);
+        switch (result) {
+        case vk::Result::eSuccess:
+            break;
+        case vk::Result::eErrorOutOfDateKHR:
+
+            recreateSwapChain();
+            return;
+        case vk::Result::eSuboptimalKHR:
+            std::cout << "vk::swapChain.acquireNextImage returned vk::Result::eSuboptimalKHR !\n";
+            break;
+        default:
+            assert(result == vk::Result::eTimeout || result == vk::Result::eNotReady);
+            throw std::runtime_error("failed to acquire swap chain image!");    // an unexpected result is returned!
+        }
+        device.resetFences(*drawFences[frameIndex]);
         // 3. Record a command buffer which draws the scene onto that image
-        commandBuffers[frameIndex].reset();
         recordCommandBuffer(imageIndex);
-        
+        device.resetFences(*drawFences[frameIndex]);
         // prepare submit
         vk::PipelineStageFlags waitDestinationStageMask(vk::PipelineStageFlagBits::eColorAttachmentOutput);
         const vk::SubmitInfo submitInfo{
@@ -671,51 +714,107 @@ private:
             .commandBufferCount = 1,
             .pCommandBuffers = &*commandBuffers[frameIndex],
             .signalSemaphoreCount = 1,
-            .pSignalSemaphores = &*renderFinishedSemaphores[imageIndex]
+            .pSignalSemaphores = &*renderFinishedSemaphores[frameIndex]
         };
         // 4. submit
         graphicsQueue.submit(submitInfo, *drawFences[frameIndex]);
 
         const vk::PresentInfoKHR presentInfoKHR{
             .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &*renderFinishedSemaphores[imageIndex],
+            .pWaitSemaphores = &*renderFinishedSemaphores[frameIndex],
             .swapchainCount = 1,
             .pSwapchains = &*swapChain,
             .pImageIndices = &imageIndex 
         };
         // 5. present
         result = presentQueue.presentKHR(presentInfoKHR);
-        switch (result)
-        {
+        switch (result){
         case vk::Result::eSuccess:
             break;
+        case vk::Result::eErrorOutOfDateKHR:
+            framebufferResized = false;
+            recreateSwapChain();
+            return;
         case vk::Result::eSuboptimalKHR:
             std::cout << "vk::Queue::presentKHR returned vk::Result::eSuboptimalKHR !\n";
+            framebufferResized = false;
+            recreateSwapChain();
             break;
         default:
-            break;        // an unexpected result is returned!
+            assert(result == vk::Result::eTimeout || result == vk::Result::eNotReady);
+            throw std::runtime_error("failed to presentswap chain image!");    // an unexpected result is returned!
         }
-
         frameIndex = (frameIndex + 1) % MAX_FRAMES_IN_FLIGHT;
-
     }
 
     void createSyncObjects() {
-
         assert(presentCompleteSemaphores.empty() && renderFinishedSemaphores.empty() && drawFences.empty());
 
-        for (int i = 0; i < swapChainImages.size(); i++) {
-            renderFinishedSemaphores.emplace_back(vk::raii::Semaphore(device, vk::SemaphoreCreateInfo()));
+        for (size_t i = 0; i < swapChainImages.size(); i++){
+            renderFinishedSemaphores.emplace_back(device, vk::SemaphoreCreateInfo());
         }
 
-        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-            presentCompleteSemaphores.emplace_back(vk::raii::Semaphore(device, vk::SemaphoreCreateInfo()));
-            drawFences.emplace_back(vk::raii::Fence(device, { .flags = vk::FenceCreateFlagBits::eSignaled }));
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++){
+            presentCompleteSemaphores.emplace_back(device, vk::SemaphoreCreateInfo());
+            drawFences.emplace_back(device, vk::FenceCreateInfo{ .flags = vk::FenceCreateFlagBits::eSignaled });
         }
     }
 
+    void recreateSwapChain(){
+        int width = 0, height = 0;
+        glfwGetFramebufferSize(window, &width, &height);
+        while (width == 0 || height == 0) {
+            glfwGetFramebufferSize(window, &width, &height);
+            glfwWaitEvents();
+        }
+        device.waitIdle();
+
+        createSwapChain();
+        createImageViews();
+    }
+
+    void cleanupSwapChain(){
+        swapChainImageViews.clear();
+        swapChain = nullptr; 
+    }
 
 
+    static void framebufferResizeCallback(GLFWwindow* window, int width, int height){
+        auto app = reinterpret_cast<HelloTriangleApplication*>(glfwGetWindowUserPointer(window));
+        app->framebufferResized = true;
+    }
+
+    void createVertexBuffer() {
+        vk::BufferCreateInfo bufferInfo{};
+        bufferInfo.size = sizeof(vertices[0]) * vertices.size();
+        bufferInfo.usage = vk::BufferUsageFlagBits::eVertexBuffer;
+        bufferInfo.sharingMode = vk::SharingMode::eExclusive;
+        vertexBuffer = vk::raii::Buffer(device, bufferInfo);
+    }
+
+};
+
+struct Vertex
+{
+    glm::vec2 position;
+    glm::vec3 color;
+
+    // describes at which rate to load data from memory throughout the vertices. .inputRate
+    // It specifies the number of bytes between data entries and whether to      .stride
+    // move to the next data entry after each vertex or after each instance.
+    // only one binding because the data is in one array element
+    //The binding parameter specifies the index of the binding in the array of bindings.
+    static vk::VertexInputBindingDescription getBindingDescription(){
+        return { .binding = 0, .stride = sizeof(Vertex), .inputRate = vk::VertexInputRate::eVertex };
+    }
+    static std::array<vk::VertexInputAttributeDescription, 2> getAttributeDescriptions()
+    {
+        return { {{.location = 0, .binding = 0, .format = vk::Format::eR32G32Sfloat, .offset = offsetof(Vertex, position)}, // 32 bit x and y
+                 {.location = 1, .binding = 0, .format = vk::Format::eR32G32B32Sfloat, .offset = offsetof(Vertex, color)}} }; // 32 bit r, g and b
+    }
+    //int2: vk::Format::eR32G32Sint, a 2 - component vector of 32 - bit signed integers
+    //uint4 : vk::Format::eR32G32B32A32Uint, a 4 - component vector of 32 - bit unsigned integers
+    //double : vk::Format::eR64Sfloat, a double - precision(64 - bit) float
 };
 
 int main() {
