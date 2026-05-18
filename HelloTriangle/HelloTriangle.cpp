@@ -47,6 +47,8 @@ public:
 private:
 
     GLFWwindow* window = nullptr;
+    // only want one device context at a time
+    vk::raii::Context context;
     // only want one instance at a time
     vk::raii::Instance instance = nullptr;
     // debug
@@ -54,8 +56,6 @@ private:
     // window, The window surface needs to be created right after the instance creation
     // because it can actually influence the physical device selection
     vk::raii::SurfaceKHR surface = nullptr;
-	// only want one device context at a time
-	vk::raii::Context context;
     // one graphics card for now
     vk::raii::PhysicalDevice physicalDevice = nullptr;
     // logical device
@@ -85,6 +85,8 @@ private:
     //frames in flight
     const uint32_t MAX_FRAMES_IN_FLIGHT = 2;
     uint32_t frameIndex = 0; //current frame
+    //window change
+    bool framebufferResized = false;
 
     
     
@@ -112,12 +114,14 @@ private:
         // tell it not to open an openGL window
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         // disable window resizing for now as its complicated
-        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+        //glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
         // 4th is more monitor selection, 5th is for opengl only
         window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan Window", nullptr, nullptr);
         if (!window) {
             throw std::runtime_error("Failed to create GLFW window");
 		}
+        glfwSetWindowUserPointer(window, this);
+        glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
     }
 
     void mainLoop() {
@@ -129,6 +133,9 @@ private:
     }
 
     void cleanup() {
+        device.waitIdle();
+        cleanupSwapChain();
+
         glfwDestroyWindow(window);
         glfwTerminate();
     }
@@ -438,6 +445,26 @@ private:
         
     }
 
+    void recreateSwapChain(){
+        int width = 0, height = 0;
+        glfwGetFramebufferSize(window, &width, &height);
+        while (width == 0 || height == 0) {
+            glfwGetFramebufferSize(window, &width, &height);
+            glfwWaitEvents();
+        }
+
+        device.waitIdle();
+
+        cleanupSwapChain();
+        createSwapChain();
+        createImageViews();
+    }
+
+    void cleanupSwapChain(){
+        swapChainImageViews.clear();
+        swapChain = nullptr;
+    }
+
     void createImageViews() {
         swapChainImageViews.clear();
 
@@ -655,9 +682,20 @@ private:
         if (device.waitForFences(*drawFences[frameIndex], vk::True, UINT64_MAX) != vk::Result::eSuccess){
             throw std::runtime_error("failed to wait for fence!");
         }
-        device.resetFences(*drawFences[frameIndex]);
         // 2. Acquire an image from the swap chain
         auto [result, imageIndex] = swapChain.acquireNextImage(UINT64_MAX, *presentCompleteSemaphores[frameIndex], nullptr);
+        if (result == vk::Result::eErrorOutOfDateKHR){
+            recreateSwapChain();
+            return;
+        }
+        if (result != vk::Result::eSuccess && result != vk::Result::eSuboptimalKHR){
+            assert(result == vk::Result::eTimeout || result == vk::Result::eNotReady);
+            throw std::runtime_error("failed to acquire swap chain image!");
+        }
+
+        device.resetFences(*drawFences[frameIndex]); // we know we are trying to do work now so reset
+        //reset too early and encounter deadlock
+
         // 3. Record a command buffer which draws the scene onto that image
         commandBuffers[frameIndex].reset();
         recordCommandBuffer(imageIndex);
@@ -685,19 +723,16 @@ private:
         };
         // 5. present
         result = presentQueue.presentKHR(presentInfoKHR);
-        switch (result)
-        {
-        case vk::Result::eSuccess:
-            break;
-        case vk::Result::eSuboptimalKHR:
-            std::cout << "vk::Queue::presentKHR returned vk::Result::eSuboptimalKHR !\n";
-            break;
-        default:
-            break;        // an unexpected result is returned!
+
+        if ((result == vk::Result::eSuboptimalKHR) || (result == vk::Result::eErrorOutOfDateKHR) || framebufferResized){
+            framebufferResized = false;
+            recreateSwapChain();
         }
-
+        else{
+            // There are no other success codes than eSuccess; on any error code, presentKHR already threw an exception.
+            assert(result == vk::Result::eSuccess);
+        }
         frameIndex = (frameIndex + 1) % MAX_FRAMES_IN_FLIGHT;
-
     }
 
     void createSyncObjects() {
@@ -714,8 +749,10 @@ private:
         }
     }
 
-
-
+    static void framebufferResizeCallback(GLFWwindow* window, int width, int height){
+        auto app = reinterpret_cast<HelloTriangleApplication*>(glfwGetWindowUserPointer(window));
+        app->framebufferResized = true;
+    }
 };
 
 int main() {
